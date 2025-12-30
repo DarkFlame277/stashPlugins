@@ -1,0 +1,14 @@
+name: Gallery-DL Metadata Importer
+description: Imports metadata from Gallery-DL JSON files into Stash images and scenes.
+version: 0.2.4
+url: https://github.com/Smasher277/stashPlugins
+
+exec:
+  - python
+  - "{pluginDir}/importer.py"
+
+interface: raw
+
+tasks:
+  - name: Import Gallery-DL Metadata
+    description: Scans the /data directory recursively and imports tags and dates from matching JSON files into corresponding images and scenes.

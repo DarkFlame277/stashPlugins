@@ -1,0 +1,1 @@
+Adjust this script so that it skips over Stash content marked as "organized".
