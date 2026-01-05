@@ -1,4 +1,4 @@
-# version: 0.2.5
+# version: 0.2.6
 
 import json
 import os
@@ -54,12 +54,12 @@ def main():
     # Prepare JSON discovery log
     # ---------------------------------
     try:
-        json_log = open(EXISTING_JSON_LOG, "a", encoding="utf-8")
+        json_log = open(EXISTING_JSON_LOG, "w", encoding="utf-8")
         json_log.write(
-            f"\n--- Scan started {datetime.datetime.now().isoformat()} ---\n"
+            f"--- Scan started {datetime.datetime.now().isoformat()} ---\n"
         )
     except Exception as e:
-        log.error(f"Failed to open existing-jsons.log: {str(e)}")
+        log.error(f"Failed to open existing-jsons.txt: {str(e)}")
         json_log = None
 
     image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
