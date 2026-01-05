@@ -1,4 +1,4 @@
-# version: 0.2.4
+# version: 0.2.5
 
 import json
 import os
@@ -8,6 +8,7 @@ from stashapi.stashapp import StashInterface
 import stashapi.log as log
 
 BLACKLIST_PATH = "/data/tag_blacklist.txt"
+EXISTING_JSON_LOG = "/data/existing-jsons.log"
 
 def load_tag_blacklist():
     blacklist = set()
@@ -49,6 +50,17 @@ def main():
         )
         root_dirs = ["/data"]
 
+    # ---------------------------------
+    # Prepare JSON discovery log
+    # ---------------------------------
+    try:
+        json_log = open(EXISTING_JSON_LOG, "a", encoding="utf-8")
+        json_log.write(
+            f"\n--- Scan started {datetime.datetime.now().isoformat()} ---\n"
+        )
+    except Exception as e:
+        log.error(f"Failed to open existing-jsons.log: {str(e)}")
+        json_log = None
 
     image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
     video_extensions = {'.mp4', '.mkv', '.avi', '.webm'}
@@ -66,6 +78,9 @@ def main():
                 json_path = media_path + ".json"
                 if not os.path.exists(json_path):
                     continue
+
+                if json_log:
+                    json_log.write(json_path + "\n")
 
                 log.info(f"Processing file: {media_path}")
 
@@ -129,7 +144,7 @@ def main():
                 )
 
                 if len(items) != 1:
-                    log.error(f"Item not found or multiple matches for {media_path}")
+                    log.error(f"Item not found or multiple matches for {media_path}. Have you Scanned in your new files yet?")
                     continue
 
                 item = items[0]
@@ -201,6 +216,9 @@ def main():
                     log.info(f"Updated metadata for {media_path}")
                 except Exception as e:
                     log.error(f"Failed to update {media_path}: {str(e)}")
+
+    if json_log:
+        json_log.close()
 
     log.info("Import completed")
     sys.exit(0)
