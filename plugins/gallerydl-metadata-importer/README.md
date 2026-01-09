@@ -7,18 +7,20 @@ This plugin for the Stash app scans your media library and imports metadata from
 - **Metadata Import**: Parses Gallery-DL JSON files to extract and apply metadata to matching Stash items, only updating if changes are detected for idempotent operation.
 - **Tag Blacklist Filtering**: Loads a set of excluded tags from `/data/tag_blacklist.txt` (ignoring commented lines starting with `#` and empty lines), removing them from imported tags and existing item tags during updates.
 - **Organized Item Skipping**: Ignores items already marked as "organized" in Stash to prevent overwriting curated metadata.
-- **Error Handling and Logging**: Provides detailed logs for processing progress, skips, and errors like invalid JSON or API failures.
+- **Error Handling and Logging**: Provides detailed logs for processed files, skips, and errors like invalid JSON or API failures. Each existing JSON file is also logged to `existing-jsons.log`.
 
 ## Installation and Usage
 1. Add this repo as a source in your Settings > Plugins > Available Plugins.
 2. Checkmark this plugin and click Install.
 3. Run the 'Import Gallery-DL Metadata' task from the Tasks menu to start the process.
 4. Optionally, add a `tag_blacklist.txt` file to your Stash data directory to exclude specific tags. The format is plaintext, with just one tag per line. You can add comments by prepending `#` to the line.
-The plugin runs on demand and processes all eligible files in one go. It assumes JSON files are named identically to the media with a .json extension and located in the same directory.
+5. The log of your existing JSON files will be at `/data/existing-jsons.log`. I did not test if the plugin fails when the file doesn't already exist.
+The plugin runs on demand and processes all eligible files in one go. It assumes JSON files are named identically to the media with a .json extension and located in the same directory. (E.g. `3333777.jpg` and `3333777.jpg.json`.)
 
 ## Metadata Mapping
 The plugin extracts the following fields from Gallery-DL JSON files and maps them to Stash fields:
-- **Tags**: Pulled from the `"tags"` field, filtered against the blacklist, and added to the item's tags (creating new tags in Stash if needed).
+- **Tags**: Pulled from the `"tags"` and `"tags_general"` fields, filtered against the blacklist, and added to the item's tags (creating new tags in Stash if needed).
+- **Performers**: Obtained from the `"tags_character"` field and updated added to the item.
 - **Date**: Extracted from the `"date"` field, converted to ISO date-only format ("`YYYY-MM-DD"`), and set as the item's date.
 - **Title**: Taken from the `"id"` field and applied as the item's title.
 - **URLs**: Collected from the `"file_url"` field and the `"source"` field, and updated on the item.

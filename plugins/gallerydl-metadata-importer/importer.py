@@ -1,4 +1,4 @@
-# version: 0.2.6
+# version: 0.3.0
 
 import json
 import os
@@ -95,14 +95,46 @@ def main():
                 # Extract tags (JSON)
                 # -------------------
                 new_tags = []
-                if "tags" in data:
+
+                # Parse "tags" field (comma or space delimited)
+                if isinstance(data.get("tags"), str):
                     try:
-                        new_tags = data["tags"].split()
+                        raw_tags = data["tags"].strip()
+                        if "," in raw_tags:
+                            parsed_tags = [t.strip() for t in raw_tags.split(",")]
+                        else:
+                            parsed_tags = raw_tags.split()
+                        new_tags.extend(parsed_tags)
                     except Exception as e:
                         log.error(f"Failed to parse tags in {json_path}: {str(e)}")
 
-                # Remove blacklisted tags from JSON input
-                new_tags = [t for t in new_tags if t not in tag_blacklist]
+                # Parse "tags_general" field (space delimited)
+                if isinstance(data.get("tags_general"), str):
+                    try:
+                        new_tags.extend(data["tags_general"].split())
+                    except Exception as e:
+                        log.error(f"Failed to parse tags_general in {json_path}: {str(e)}")
+
+                # Deduplicate + blacklist filter
+                new_tags = [
+                    t for t in set(new_tags)
+                    if t and t not in tag_blacklist
+                ]
+
+                # -------------------
+                # Extract performers (tags_character)
+                # -------------------
+                new_performers = []
+
+                # Parse "tags_character" field (space delimited)
+                if isinstance(data.get("tags_character"), str):
+                    try:
+                        new_performers = [
+                            p for p in data["tags_character"].split()
+                            if p
+                        ]
+                    except Exception as e:
+                        log.error(f"Failed to parse tags_character in {json_path}: {str(e)}")
 
                 # -------------------
                 # Extract date
@@ -158,6 +190,13 @@ def main():
                 current_tags = [t['name'] for t in item['tags']]
                 current_tags = [t for t in current_tags if t not in tag_blacklist]
 
+                current_performers = []
+                for p in item.get("performers", []):
+                    if isinstance(p, dict):
+                        name = p.get("name")
+                        if name:
+                            current_performers.append(name)
+
                 current_date = item.get('date')
                 current_title = item.get('title')
                 current_urls = item.get('urls') or []
@@ -166,6 +205,13 @@ def main():
                 # Combine tags
                 # -------------------
                 all_tag_names = list(set(current_tags + new_tags))
+
+                # -------------------
+                # Combine performers
+                # -------------------
+                all_performer_names = list(
+                    set(current_performers + new_performers)
+                )
 
                 # -------------------
                 # Combine URLs
@@ -179,8 +225,11 @@ def main():
                 date_changed = date and current_date != date
                 title_changed = title and current_title != title
                 urls_changed = set(all_urls) != set(current_urls)
+                performers_changed = (
+                    set(all_performer_names) != set(current_performers)
+                )
 
-                if not (tags_changed or date_changed or title_changed or urls_changed):
+                if not (tags_changed or date_changed or title_changed or urls_changed or performers_changed):
                     log.info(f"No changes needed for {media_path}")
                     continue
 
@@ -194,11 +243,24 @@ def main():
                     tag_ids.append(tag['id'])
 
                 # -------------------
+                # Get/Create performer IDs
+                # -------------------
+                performer_ids = []
+
+                for performer_name in all_performer_names:
+                    performers = client.find_performers(q=performer_name)
+                    performer = performers[0] if performers else client.create_performer({
+                        "name": performer_name
+                    })
+                    performer_ids.append(performer["id"])
+
+                # -------------------
                 # Prepare update
                 # -------------------
                 update_data = {
                     "id": item_id,
-                    "tag_ids": tag_ids
+                    "tag_ids": tag_ids,
+                    "performer_ids": performer_ids
                 }
 
                 if date_changed:

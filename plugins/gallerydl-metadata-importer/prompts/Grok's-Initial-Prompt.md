@@ -1,3 +1,5 @@
+# Grok's Initial Prompt
+
 You are an expert in developing plugins for the Stash app (the open-source media organizer). Your task is to create a complete, functional Stash plugin that imports metadata from Gallery-DL JSON files into Stash images (individual images, not galleries) and  scenes (videos). Write the plugin in Python 3.12. Follow these requirements precisely—do not add, omit, or alter functionality unless specified.
 
 ### Key Requirements and Details:
