@@ -1,4 +1,4 @@
-# version: 0.3.0
+# version: 0.4.2
 
 import json
 import os
@@ -10,6 +10,11 @@ import stashapi.log as log
 BLACKLIST_PATH = "/data/tag_blacklist.txt"
 EXISTING_JSON_LOG = "/data/existing-jsons.log"
 
+# Normalize tags by replacing "_" with " "
+def normalize_tag(tag: str) -> str:
+    return tag.strip().replace("_", " ").strip()
+
+# Load the blacklist
 def load_tag_blacklist():
     blacklist = set()
 
@@ -30,6 +35,31 @@ def load_tag_blacklist():
 
     return blacklist
 
+# Delete blacklisted tags from Stash
+def clean_blacklisted_tags(client: StashInterface, tag_blacklist: set):
+    for tag_name in tag_blacklist:
+        # Search and delete the normalized (spaced) version
+        tags = client.find_tags(q=tag_name)
+        if tags:
+            tag_id = tags[0]['id']
+            try:
+                client.call_GQL("mutation { tagDestroy(input: {id: \"" + tag_id + "\"}) }")
+                log.info(f"Deleted blacklisted tag globally: {tag_name}")
+            except Exception as e:
+                log.error(f"Failed to delete {tag_name}: {str(e)}")
+        
+        # Compute and delete the underscored version if different
+        underscored = tag_name.replace(" ", "_")
+        if underscored != tag_name:
+            tags = client.find_tags(q=underscored)
+            if tags:
+                tag_id = tags[0]['id']
+                try:
+                    client.call_GQL("mutation { tagDestroy(input: {id: \"" + tag_id + "\"}) }")
+                    log.info(f"Deleted blacklisted underscored tag globally: {underscored}")
+                except Exception as e:
+                    log.error(f"Failed to delete {underscored}: {str(e)}")
+
 
 def main():
     try:
@@ -40,6 +70,9 @@ def main():
         sys.exit(1)
 
     tag_blacklist = load_tag_blacklist()
+
+    # Delete blacklisted tags from Stash
+    clean_blacklisted_tags(client, tag_blacklist)
 
     config = client.get_configuration()
     root_dirs = config.get("general", {}).get("stashPaths", [])
@@ -115,10 +148,10 @@ def main():
                     except Exception as e:
                         log.error(f"Failed to parse tags_general in {json_path}: {str(e)}")
 
-                # Deduplicate + blacklist filter
+                # Deduplicate + normalize + blacklist filter
                 new_tags = [
-                    t for t in set(new_tags)
-                    if t and t not in tag_blacklist
+                    normalize_tag(t) for t in set(new_tags)
+                    if t.strip() and normalize_tag(t) not in tag_blacklist
                 ]
 
                 # -------------------
@@ -188,7 +221,11 @@ def main():
                 item_id = item['id']
 
                 current_tags = [t['name'] for t in item['tags']]
-                current_tags = [t for t in current_tags if t not in tag_blacklist]
+                current_tags = [
+                    normalize_tag(t) for t in current_tags
+                    if normalize_tag(t) not in tag_blacklist
+                ]
+                blacklisted_removed = len(current_tags) < len(item['tags'])
 
                 current_performers = []
                 for p in item.get("performers", []):
@@ -225,11 +262,9 @@ def main():
                 date_changed = date and current_date != date
                 title_changed = title and current_title != title
                 urls_changed = set(all_urls) != set(current_urls)
-                performers_changed = (
-                    set(all_performer_names) != set(current_performers)
-                )
+                performers_changed = (set(all_performer_names) != set(current_performers))
 
-                if not (tags_changed or date_changed or title_changed or urls_changed or performers_changed):
+                if not (tags_changed or date_changed or title_changed or urls_changed or performers_changed or blacklisted_removed):
                     log.info(f"No changes needed for {media_path}")
                     continue
 

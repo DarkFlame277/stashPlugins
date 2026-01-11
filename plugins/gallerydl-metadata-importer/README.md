@@ -5,7 +5,7 @@ This plugin for the Stash app scans your media library and imports metadata from
 ## Features
 - **Recursive Directory Scanning**: Automatically searches through the `/data` directory and all subdirectories for compatible media files (images: .jpg, .jpeg, .png, .gif, .webp; videos: .mp4, .mkv, .avi, .webm) and their matching `.json` files.
 - **Metadata Import**: Parses Gallery-DL JSON files to extract and apply metadata to matching Stash items, only updating if changes are detected for idempotent operation.
-- **Tag Blacklist Filtering**: Loads a set of excluded tags from `/data/tag_blacklist.txt` (ignoring commented lines starting with `#` and empty lines), removing them from imported tags and existing item tags during updates.
+- **Tag Blacklist Filtering**: Loads a set of excluded tags from `/data/tag_blacklist.txt` (ignoring commented lines starting with `#` and empty lines), removing them from imported tags and existing item tags during re-runs.
 - **Organized Item Skipping**: Ignores items already marked as "organized" in Stash to prevent overwriting curated metadata.
 - **Error Handling and Logging**: Provides detailed logs for processed files, skips, and errors like invalid JSON or API failures. Each existing JSON file is also logged to `existing-jsons.log`.
 
@@ -26,7 +26,7 @@ The plugin extracts the following fields from Gallery-DL JSON files and maps the
 - **URLs**: Collected from the `"file_url"` field and the `"source"` field, and updated on the item.
 
 ## Credits
-The core code was created by Grok, with additions and refinements done by ChatGPT.
+The code was created by Grok and ChatGPT.
 
 ## P.S.
 The `prompts` folder contains markdown files of the prompts I used to create this plugin.
