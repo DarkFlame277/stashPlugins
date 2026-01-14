@@ -21,7 +21,6 @@ The plugin runs on demand and processes all eligible files in one go. It assumes
 The plugin extracts the following fields from Gallery-DL JSON files and maps them to Stash fields:
 - **Tags**: Pulled from the `"tags"` and `"tags_general"` fields, filtered against the blacklist, and added to the item's tags (creating new tags in Stash if needed).
 - **Performers**: Obtained from the `"tags_character"` field and updated added to the item.
-- **Date**: Extracted from the `"date"` field, converted to ISO date-only format ("`YYYY-MM-DD"`), and set as the item's date.
 - **Title**: Taken from the `"id"` field and applied as the item's title.
 - **URLs**: Collected from the `"file_url"` field and the `"source"` field, and updated on the item.
 
