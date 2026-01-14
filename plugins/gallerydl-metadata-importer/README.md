@@ -29,4 +29,4 @@ The plugin extracts the following fields from Gallery-DL JSON files and maps the
 The code was created by Grok and ChatGPT.
 
 ## P.S.
-The `prompts` folder contains markdown files of the prompts I used to create this plugin.
+The `prompts` folder contains markdown files of most of the prompts I used to create this plugin.

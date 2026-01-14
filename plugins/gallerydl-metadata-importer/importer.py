@@ -1,4 +1,4 @@
-# version: 0.4.2
+# version: 0.5.0
 
 import json
 import os
@@ -15,7 +15,7 @@ def normalize_tag(tag: str) -> str:
     return tag.strip().replace("_", " ").strip()
 
 # Load the blacklist
-def load_tag_blacklist():
+def load_tag_blacklist() -> set:
     blacklist = set()
 
     if not os.path.exists(BLACKLIST_PATH):
@@ -60,7 +60,6 @@ def clean_blacklisted_tags(client: StashInterface, tag_blacklist: set):
                 except Exception as e:
                     log.error(f"Failed to delete {underscored}: {str(e)}")
 
-
 def main():
     try:
         json_input = json.loads(sys.stdin.read())
@@ -75,28 +74,23 @@ def main():
     clean_blacklisted_tags(client, tag_blacklist)
 
     config = client.get_configuration()
-    root_dirs = config.get("general", {}).get("stashPaths", [])
+    root_dirs = [path["path"] for path in config.get("general", {}).get("stashes", [])]
 
     if not root_dirs:
-        log.warning(
-            "No Stash library paths found via API; falling back to /data"
-        )
+        log.warning("No Stash library paths found via API; falling back to /data")
         root_dirs = ["/data"]
 
-    # ---------------------------------
     # Prepare JSON discovery log
-    # ---------------------------------
+    json_log = None
     try:
         json_log = open(EXISTING_JSON_LOG, "w", encoding="utf-8")
-        json_log.write(
-            f"--- Scan started {datetime.datetime.now().isoformat()} ---\n"
-        )
+        json_log.write(f"--- Scan started {datetime.datetime.now().isoformat()} ---\n")
     except Exception as e:
         log.error(f"Failed to open existing-jsons.txt: {str(e)}")
-        json_log = None
 
     image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
     video_extensions = {'.mp4', '.mkv', '.avi', '.webm'}
+    media_extensions = image_extensions | video_extensions
 
     for root_dir in root_dirs:
         log.info(f"Scanning library path: {root_dir}")
@@ -104,7 +98,7 @@ def main():
         for dirpath, dirnames, filenames in os.walk(root_dir):
             for filename in filenames:
                 ext = os.path.splitext(filename)[1].lower()
-                if ext not in image_extensions and ext not in video_extensions:
+                if ext not in media_extensions:
                     continue
 
                 media_path = os.path.join(dirpath, filename)
@@ -118,198 +112,134 @@ def main():
                 log.info(f"Processing file: {media_path}")
 
                 try:
-                    with open(json_path, 'r') as f:
+                    with open(json_path, 'r', encoding="utf-8") as f:
                         data = json.load(f)
                 except Exception as e:
                     log.error(f"Invalid JSON in {json_path}: {str(e)}")
                     continue
 
-                # -------------------
-                # Extract tags (JSON)
-                # -------------------
-                new_tags = []
+                # Extract tags
+                new_tags = set()
 
                 # Parse "tags" field (comma or space delimited)
-                if isinstance(data.get("tags"), str):
-                    try:
-                        raw_tags = data["tags"].strip()
-                        if "," in raw_tags:
-                            parsed_tags = [t.strip() for t in raw_tags.split(",")]
-                        else:
-                            parsed_tags = raw_tags.split()
-                        new_tags.extend(parsed_tags)
-                    except Exception as e:
-                        log.error(f"Failed to parse tags in {json_path}: {str(e)}")
+                if "tags" in data and isinstance(data["tags"], str):
+                    raw_tags = data["tags"].strip()
+                    if "," in raw_tags:
+                        new_tags.update(t.strip() for t in raw_tags.split(","))
+                    else:
+                        new_tags.update(raw_tags.split())
 
                 # Parse "tags_general" field (space delimited)
-                if isinstance(data.get("tags_general"), str):
-                    try:
-                        new_tags.extend(data["tags_general"].split())
-                    except Exception as e:
-                        log.error(f"Failed to parse tags_general in {json_path}: {str(e)}")
+                if "tags_general" in data and isinstance(data["tags_general"], str):
+                    new_tags.update(data["tags_general"].split())
 
-                # Deduplicate + normalize + blacklist filter
-                new_tags = [
-                    normalize_tag(t) for t in set(new_tags)
-                    if t.strip() and normalize_tag(t) not in tag_blacklist
-                ]
+                # Normalize and filter blacklist
+                new_tags = {normalize_tag(t) for t in new_tags if t.strip() and normalize_tag(t) not in tag_blacklist}
 
-                # -------------------
                 # Extract performers (tags_character)
-                # -------------------
-                new_performers = []
+                new_performers = set()
+                if "tags_character" in data and isinstance(data["tags_character"], str):
+                    new_performers = {p.strip() for p in data["tags_character"].split() if p.strip()}
 
-                # Parse "tags_character" field (space delimited)
-                if isinstance(data.get("tags_character"), str):
-                    try:
-                        new_performers = [
-                            p for p in data["tags_character"].split()
-                            if p
-                        ]
-                    except Exception as e:
-                        log.error(f"Failed to parse tags_character in {json_path}: {str(e)}")
-
-                # -------------------
                 # Extract date
-                # -------------------
                 date = None
                 if "date" in data:
                     try:
                         dt = datetime.datetime.strptime(data["date"], "%Y-%m-%d %H:%M:%S")
                         date = dt.date().isoformat()
-                    except Exception as e:
-                        log.error(f"Invalid date format in {json_path}: {str(e)}")
+                    except ValueError:
+                        log.error(f"Invalid date format in {json_path}: {data['date']}")
 
-                # -------------------
                 # Extract title
-                # -------------------
                 title = data.get("id")
 
-                # -------------------
                 # Extract URLs
-                # -------------------
-                new_urls = []
+                new_urls = set()
+                if "file_url" in data:
+                    new_urls.add(data["file_url"])
+                if "source" in data and isinstance(data["source"], str):
+                    new_urls.update(data["source"].split())
 
-                if data.get("file_url"):
-                    new_urls.append(data["file_url"])
-
-                if data.get("source"):
-                    new_urls.extend(data["source"].split())
-
-                # -------------------
                 # Determine type
-                # -------------------
                 item_type = 'image' if ext in image_extensions else 'scene'
 
+                # Find item in Stash
                 filter_dict = {"path": {"value": media_path, "modifier": "EQUALS"}}
-                items = (
-                    client.find_scenes(filter_dict)
-                    if item_type == 'scene'
-                    else client.find_images(filter_dict)
-                )
+                find_func = client.find_images if item_type == 'image' else client.find_scenes
+                items = find_func(filter_dict)
 
                 if len(items) != 1:
-                    log.error(f"Item not found or multiple matches for {media_path}. Have you Scanned in your new files yet?")
+                    log.error(f"Item not found or multiple matches for {media_path}. Have you scanned in your new files yet?")
                     continue
 
                 item = items[0]
-
                 if item.get("organized"):
                     log.info(f"Skipping organized item: {media_path}")
                     continue
 
                 item_id = item['id']
 
-                current_tags = [t['name'] for t in item['tags']]
-                current_tags = [
-                    normalize_tag(t) for t in current_tags
-                    if normalize_tag(t) not in tag_blacklist
-                ]
-                blacklisted_removed = len(current_tags) < len(item['tags'])
+                # Get current tags, normalized and filtered
+                current_tags = {normalize_tag(t['name']) for t in item.get('tags', [])}
+                blacklisted_removed = any(normalize_tag(t['name']) in tag_blacklist for t in item.get('tags', []))
 
-                current_performers = []
-                for p in item.get("performers", []):
-                    if isinstance(p, dict):
-                        name = p.get("name")
-                        if name:
-                            current_performers.append(name)
+                if blacklisted_removed:
+                    current_tags = {t for t in current_tags if t not in tag_blacklist}
+
+                # Get current performers
+                current_performers = {p['name'] for p in item.get('performers', []) if 'name' in p}
 
                 current_date = item.get('date')
                 current_title = item.get('title')
-                current_urls = item.get('urls') or []
+                current_urls = set(item.get('urls') or [])
 
-                # -------------------
-                # Combine tags
-                # -------------------
-                all_tag_names = list(set(current_tags + new_tags))
+                # Combine data
+                all_tags = current_tags | new_tags
+                all_performers = current_performers | new_performers
+                all_urls = current_urls | new_urls
 
-                # -------------------
-                # Combine performers
-                # -------------------
-                all_performer_names = list(
-                    set(current_performers + new_performers)
-                )
-
-                # -------------------
-                # Combine URLs
-                # -------------------
-                all_urls = list(dict.fromkeys(current_urls + new_urls))
-
-                # -------------------
                 # Detect changes
-                # -------------------
-                tags_changed = set(all_tag_names) != set([t['name'] for t in item['tags']])
+                tags_changed = all_tags != {normalize_tag(t['name']) for t in item.get('tags', []) if normalize_tag(t['name']) not in tag_blacklist}
+                performers_changed = all_performers != current_performers
                 date_changed = date and current_date != date
                 title_changed = title and current_title != title
-                urls_changed = set(all_urls) != set(current_urls)
-                performers_changed = (set(all_performer_names) != set(current_performers))
+                urls_changed = all_urls != current_urls
 
-                if not (tags_changed or date_changed or title_changed or urls_changed or performers_changed or blacklisted_removed):
+                if not (tags_changed or performers_changed or date_changed or title_changed or urls_changed or blacklisted_removed):
                     log.info(f"No changes needed for {media_path}")
                     continue
 
-                # -------------------
                 # Get/Create tag IDs
-                # -------------------
                 tag_ids = []
-                for tag_name in all_tag_names:
-                    tags = client.find_tags(q=tag_name)
+                for tag_name in all_tags:
+                    tags = client.find_tags({"name": {"value": tag_name, "modifier": "EQUALS"}})
                     tag = tags[0] if tags else client.create_tag({"name": tag_name})
                     tag_ids.append(tag['id'])
 
-                # -------------------
                 # Get/Create performer IDs
-                # -------------------
                 performer_ids = []
+                for performer_name in all_performers:
+                    performers = client.find_performers({"name": {"value": performer_name, "modifier": "EQUALS"}})
+                    performer = performers[0] if performers else client.create_performer({"name": performer_name})
+                    performer_ids.append(performer['id'])
 
-                for performer_name in all_performer_names:
-                    performers = client.find_performers(q=performer_name)
-                    performer = performers[0] if performers else client.create_performer({
-                        "name": performer_name
-                    })
-                    performer_ids.append(performer["id"])
-
-                # -------------------
                 # Prepare update
-                # -------------------
                 update_data = {
                     "id": item_id,
                     "tag_ids": tag_ids,
                     "performer_ids": performer_ids
                 }
-
                 if date_changed:
                     update_data["date"] = date
                 if title_changed:
                     update_data["title"] = title
                 if urls_changed:
-                    update_data["urls"] = all_urls
+                    update_data["urls"] = list(all_urls)
 
+                # Update item
+                update_func = client.update_image if item_type == 'image' else client.update_scene
                 try:
-                    if item_type == 'scene':
-                        client.update_scene(update_data)
-                    else:
-                        client.update_image(update_data)
+                    update_func(update_data)
                     log.info(f"Updated metadata for {media_path}")
                 except Exception as e:
                     log.error(f"Failed to update {media_path}: {str(e)}")
@@ -320,6 +250,6 @@ def main():
     log.info("Import completed")
     sys.exit(0)
 
-
 if __name__ == '__main__':
     main()
+    
