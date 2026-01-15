@@ -1,4 +1,4 @@
-# version: 0.5.2
+# version: 0.5.0
 
 import json
 import os
@@ -141,6 +141,15 @@ def main():
                 if "tags_character" in data and isinstance(data["tags_character"], str):
                     new_performers = {p.strip() for p in data["tags_character"].split() if p.strip()}
 
+                # Extract date
+                date = None
+                if "date" in data:
+                    try:
+                        dt = datetime.datetime.strptime(data["date"], "%Y-%m-%d %H:%M:%S")
+                        date = dt.date().isoformat()
+                    except ValueError:
+                        log.error(f"Invalid date format in {json_path}: {data['date']}")
+
                 # Extract title
                 title = data.get("id")
 
@@ -180,6 +189,7 @@ def main():
                 # Get current performers
                 current_performers = {p['name'] for p in item.get('performers', []) if 'name' in p}
 
+                current_date = item.get('date')
                 current_title = item.get('title')
                 current_urls = set(item.get('urls') or [])
 
@@ -191,10 +201,11 @@ def main():
                 # Detect changes
                 tags_changed = all_tags != {normalize_tag(t['name']) for t in item.get('tags', []) if normalize_tag(t['name']) not in tag_blacklist}
                 performers_changed = all_performers != current_performers
+                date_changed = date and current_date != date
                 title_changed = title and current_title != title
                 urls_changed = all_urls != current_urls
 
-                if not (tags_changed or performers_changed or title_changed or urls_changed or blacklisted_removed):
+                if not (tags_changed or performers_changed or date_changed or title_changed or urls_changed or blacklisted_removed):
                     log.info(f"No changes needed for {media_path}")
                     continue
 
@@ -218,6 +229,8 @@ def main():
                     "tag_ids": tag_ids,
                     "performer_ids": performer_ids
                 }
+                if date_changed:
+                    update_data["date"] = date
                 if title_changed:
                     update_data["title"] = title
                 if urls_changed:
@@ -239,3 +252,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    
