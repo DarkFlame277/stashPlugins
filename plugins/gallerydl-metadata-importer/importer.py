@@ -1,4 +1,4 @@
-# version: 0.5.0
+# version: 0.5.5
 
 import json
 import os
@@ -10,11 +10,11 @@ import stashapi.log as log
 BLACKLIST_PATH = "/data/tag_blacklist.txt"
 EXISTING_JSON_LOG = "/data/existing-jsons.log"
 
-# Normalize tags by replacing "_" with " "
+
 def normalize_tag(tag: str) -> str:
     return tag.strip().replace("_", " ").strip()
 
-# Load the blacklist
+
 def load_tag_blacklist() -> set:
     blacklist = set()
 
@@ -28,77 +28,136 @@ def load_tag_blacklist() -> set:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                blacklist.add(line)
+                blacklist.add(normalize_tag(line))
         log.info(f"Loaded {len(blacklist)} blacklisted tags")
     except Exception as e:
         log.error(f"Failed to read tag_blacklist.txt: {str(e)}")
 
     return blacklist
 
-# Delete blacklisted tags from Stash
-def clean_blacklisted_tags(client: StashInterface, tag_blacklist: set):
-    for tag_name in tag_blacklist:
-        # Search and delete the normalized (spaced) version
-        tags = client.find_tags(q=tag_name)
-        if tags:
-            tag_id = tags[0]['id']
-            try:
-                client.call_GQL("mutation { tagDestroy(input: {id: \"" + tag_id + "\"}) }")
-                log.info(f"Deleted blacklisted tag globally: {tag_name}")
-            except Exception as e:
-                log.error(f"Failed to delete {tag_name}: {str(e)}")
+
+def get_stash_config(client: StashInterface):
+    """
+    Fetches the plugin configuration directly from Stash.
+    Uses the standard get_configuration() method to avoid GraphQL schema errors.
+    """
+    try:
+        # Get the full configuration object
+        config = client.get_configuration()
         
-        # Compute and delete the underscored version if different
-        underscored = tag_name.replace(" ", "_")
-        if underscored != tag_name:
-            tags = client.find_tags(q=underscored)
+        # Access the plugins map (which is a dict of {plugin_id: settings})
+        plugins_map = config.get("plugins")
+        
+        if not plugins_map:
+            log.warning("No plugins configuration found in Stash.")
+            return None
+
+        # Try to find the correct key for this plugin.
+        # The key is usually the filename (without .yml). 
+        # Since we know the file is 'gallerydl-importer.yml', we look for keys containing "gallery" or "dl".
+        possible_keys = []
+        for k in plugins_map.keys():
+            if "gallery" in k.lower() or "dl" in k.lower():
+                possible_keys.append(k)
+
+        if len(possible_keys) == 1:
+            log.info(f"Found matching plugin config key: {possible_keys[0]}")
+            return plugins_map[possible_keys[0]]
+        elif len(possible_keys) > 1:
+            # Ambiguous, but let's try the first one
+            log.warning(f"Multiple matching plugin keys found: {possible_keys}. Using first match.")
+            return plugins_map[possible_keys[0]]
+        else:
+            # Log available keys for debugging
+            log.warning("Could not automatically identify plugin settings. Available plugin keys:")
+            for k in plugins_map.keys():
+                log.warning(f" - {k}")
+            return None
+                
+    except Exception as e:
+        log.error(f"Failed to fetch config from Stash API: {str(e)}")
+        return None
+
+
+def clean_blacklisted_tags(client: StashInterface, tag_blacklist: set, dry_run: bool):
+    for tag_name in tag_blacklist:
+        for variant in {tag_name, tag_name.replace(" ", "_")}:
+            tags = client.find_tags({"name": {"value": variant, "modifier": "EQUALS"}})
             if tags:
-                tag_id = tags[0]['id']
-                try:
-                    client.call_GQL("mutation { tagDestroy(input: {id: \"" + tag_id + "\"}) }")
-                    log.info(f"Deleted blacklisted underscored tag globally: {underscored}")
-                except Exception as e:
-                    log.error(f"Failed to delete {underscored}: {str(e)}")
+                tag_id = tags[0]["id"]
+                if dry_run:
+                    log.info(f"[DRY-RUN] Would delete blacklisted tag: {variant}")
+                else:
+                    try:
+                        client.call_GQL(
+                            f'mutation {{ tagDestroy(input: {{id: "{tag_id}"}}) }}'
+                        )
+                        log.info(f"Deleted blacklisted tag globally: {variant}")
+                    except Exception as e:
+                        log.error(f"Failed to delete {variant}: {str(e)}")
+
 
 def main():
     try:
         json_input = json.loads(sys.stdin.read())
         client = StashInterface(json_input["server_connection"])
+        settings = json_input.get("args", {})
     except Exception as e:
-        log.error(f"Failed to initialize StashInterface: {str(e)}")
+        log.error(f"Failed to initialize plugin: {str(e)}")
         sys.exit(1)
 
-    tag_blacklist = load_tag_blacklist()
+    # ---------------------------------------------------------
+    # FIX FOR EMPTY SETTINGS
+    # ---------------------------------------------------------
+    # If args is empty (common when running from Tasks menu), 
+    # fetch the settings manually from Stash's database.
+    if not settings:
+        log.warning("No arguments received from Stash. Fetching configuration from API...")
+        settings = get_stash_config(client)
+        if settings:
+            log.info(f"Fetched settings from API: {settings}")
+        else:
+            log.error("Could not load settings. Using defaults (Dry Run ON).")
+    # ---------------------------------------------------------
 
-    # Delete blacklisted tags from Stash
-    clean_blacklisted_tags(client, tag_blacklist)
+    # Load settings (Default False)
+    disable_tagging = settings.get("disable_tagging", False)
+    include_organized = settings.get("include_organized", False)
+    disable_title_changes = settings.get("disable_title_changes", False)
+    disable_performer_adding = settings.get("disable_performer_adding", False)
+    disable_url_mapping = settings.get("disable_url_mapping", False)
+    enable_dating = settings.get("enable_dating", False)
+
+    disable_dry_run = settings.get("disable_dry_run", False)
+    dry_run = not disable_dry_run
+
+    log.info(f"Dry-run mode: {dry_run}")
+    if dry_run:
+        log.warning("!!! DRY RUN IS ACTIVE. NO CHANGES WILL BE SAVED !!!")
+    else:
+        log.warning("!!! DRY RUN IS DISABLED. CHANGES WILL BE APPLIED !!!")
+
+    tag_blacklist = load_tag_blacklist()
+    clean_blacklisted_tags(client, tag_blacklist, dry_run)
 
     config = client.get_configuration()
-    root_dirs = [path["path"] for path in config.get("general", {}).get("stashes", [])]
+    root_dirs = [p["path"] for p in config.get("general", {}).get("stashes", [])] or ["/data"]
 
-    if not root_dirs:
-        log.warning("No Stash library paths found via API; falling back to /data")
-        root_dirs = ["/data"]
-
-    # Prepare JSON discovery log
     json_log = None
     try:
         json_log = open(EXISTING_JSON_LOG, "w", encoding="utf-8")
         json_log.write(f"--- Scan started {datetime.datetime.now().isoformat()} ---\n")
     except Exception as e:
-        log.error(f"Failed to open existing-jsons.txt: {str(e)}")
+        log.error(f"Failed to open existing-jsons.log: {str(e)}")
 
-    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
-    video_extensions = {'.mp4', '.mkv', '.avi', '.webm'}
-    media_extensions = image_extensions | video_extensions
+    image_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+    video_exts = {".mp4", ".mkv", ".avi", ".webm"}
 
-    for root_dir in root_dirs:
-        log.info(f"Scanning library path: {root_dir}")
-
-        for dirpath, dirnames, filenames in os.walk(root_dir):
+    for root in root_dirs:
+        for dirpath, _, filenames in os.walk(root):
             for filename in filenames:
                 ext = os.path.splitext(filename)[1].lower()
-                if ext not in media_extensions:
+                if ext not in image_exts | video_exts:
                     continue
 
                 media_path = os.path.join(dirpath, filename)
@@ -109,147 +168,143 @@ def main():
                 if json_log:
                     json_log.write(json_path + "\n")
 
-                log.info(f"Processing file: {media_path}")
-
                 try:
-                    with open(json_path, 'r', encoding="utf-8") as f:
+                    with open(json_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                except Exception as e:
-                    log.error(f"Invalid JSON in {json_path}: {str(e)}")
+                except Exception:
                     continue
 
-                # Extract tags
-                new_tags = set()
+                item_type = "image" if ext in image_exts else "scene"
+                finder = client.find_images if item_type == "image" else client.find_scenes
 
-                # Parse "tags" field (comma or space delimited)
-                if "tags" in data and isinstance(data["tags"], str):
-                    raw_tags = data["tags"].strip()
-                    if "," in raw_tags:
-                        new_tags.update(t.strip() for t in raw_tags.split(","))
-                    else:
-                        new_tags.update(raw_tags.split())
-
-                # Parse "tags_general" field (space delimited)
-                if "tags_general" in data and isinstance(data["tags_general"], str):
-                    new_tags.update(data["tags_general"].split())
-
-                # Normalize and filter blacklist
-                new_tags = {normalize_tag(t) for t in new_tags if t.strip() and normalize_tag(t) not in tag_blacklist}
-
-                # Extract performers (tags_character)
-                new_performers = set()
-                if "tags_character" in data and isinstance(data["tags_character"], str):
-                    new_performers = {p.strip() for p in data["tags_character"].split() if p.strip()}
-
-                # Extract date
-                date = None
-                if "date" in data:
-                    try:
-                        dt = datetime.datetime.strptime(data["date"], "%Y-%m-%d %H:%M:%S")
-                        date = dt.date().isoformat()
-                    except ValueError:
-                        log.error(f"Invalid date format in {json_path}: {data['date']}")
-
-                # Extract title
-                title = data.get("id")
-
-                # Extract URLs
-                new_urls = set()
-                if "file_url" in data:
-                    new_urls.add(data["file_url"])
-                if "source" in data and isinstance(data["source"], str):
-                    new_urls.update(data["source"].split())
-
-                # Determine type
-                item_type = 'image' if ext in image_extensions else 'scene'
-
-                # Find item in Stash
-                filter_dict = {"path": {"value": media_path, "modifier": "EQUALS"}}
-                find_func = client.find_images if item_type == 'image' else client.find_scenes
-                items = find_func(filter_dict)
-
+                items = finder({"path": {"value": media_path, "modifier": "EQUALS"}})
                 if len(items) != 1:
-                    log.error(f"Item not found or multiple matches for {media_path}. Have you scanned in your new files yet?")
                     continue
 
                 item = items[0]
-                if item.get("organized"):
-                    log.info(f"Skipping organized item: {media_path}")
+                
+                # If we are NOT including organized items (Default), skip organized ones
+                if not include_organized and item.get("organized"):
                     continue
 
-                item_id = item['id']
+                item_id = item["id"]
+                update = {"id": item_id}
 
-                # Get current tags, normalized and filtered
-                current_tags = {normalize_tag(t['name']) for t in item.get('tags', [])}
-                blacklisted_removed = any(normalize_tag(t['name']) in tag_blacklist for t in item.get('tags', []))
+                # ---- TAGS ----
+                # Run if tagging is NOT disabled
+                if not disable_tagging:
+                    new_tags = set()
 
-                if blacklisted_removed:
-                    current_tags = {t for t in current_tags if t not in tag_blacklist}
+                    for field in ("tags", "tags_general"):
+                        if isinstance(data.get(field), str):
+                            tag_string = data[field]
+                            
+                            # Check if comma exists to determine delimiter
+                            if "," in tag_string:
+                                # If commas are present, split strictly by comma
+                                new_tags.update(tag_string.split(","))
+                            else:
+                                # If no commas, fallback to splitting by space
+                                new_tags.update(tag_string.split())
 
-                # Get current performers
-                current_performers = {p['name'] for p in item.get('performers', []) if 'name' in p}
+                    # Filter against blacklist
+                    new_tags = {
+                        normalize_tag(t)
+                        for t in new_tags
+                        if normalize_tag(t) not in tag_blacklist
+                    }
 
-                current_date = item.get('date')
-                current_title = item.get('title')
-                current_urls = set(item.get('urls') or [])
+                    if new_tags:
+                        tag_ids = []
+                        for t in new_tags:
+                            # Check if tag exists
+                            tags = client.find_tags({"name": {"value": t, "modifier": "EQUALS"}})
+                            if tags:
+                                tag_ids.append(tags[0]["id"])
+                            else:
+                                # Tag does not exist
+                                if not dry_run:
+                                    # Only create if NOT in dry run
+                                    tag = client.create_tag({"name": t})
+                                    tag_ids.append(tag["id"])
+                                    log.info(f"Created new tag: {t}")
+                                else:
+                                    # If Dry Run, log intent but do not create
+                                    log.info(f"[DRY-RUN] Would create tag: {t}")
+                        
+                        # Only add tag_ids to update if we actually have IDs
+                        if tag_ids:
+                            update["tag_ids"] = tag_ids
 
-                # Combine data
-                all_tags = current_tags | new_tags
-                all_performers = current_performers | new_performers
-                all_urls = current_urls | new_urls
+                # ---- PERFORMERS ----
+                # Run if performer adding is NOT disabled
+                if not disable_performer_adding and isinstance(data.get("tags_character"), str):
+                    performer_ids = []
+                    for name in data["tags_character"].split():
+                        # Check if performer exists
+                        performers = client.find_performers(
+                            {"name": {"value": name, "modifier": "EQUALS"}}
+                        )
+                        if performers:
+                            performer_ids.append(performers[0]["id"])
+                        else:
+                            # Performer does not exist
+                            if not dry_run:
+                                # Only create if NOT in dry run
+                                performer = client.create_performer({"name": name})
+                                performer_ids.append(performer["id"])
+                                log.info(f"Created new performer: {name}")
+                            else:
+                                # If Dry Run, log intent but do not create
+                                log.info(f"[DRY-RUN] Would create performer: {name}")
 
-                # Detect changes
-                tags_changed = all_tags != {normalize_tag(t['name']) for t in item.get('tags', []) if normalize_tag(t['name']) not in tag_blacklist}
-                performers_changed = all_performers != current_performers
-                date_changed = date and current_date != date
-                title_changed = title and current_title != title
-                urls_changed = all_urls != current_urls
+                    if performer_ids:
+                        update["performer_ids"] = performer_ids
 
-                if not (tags_changed or performers_changed or date_changed or title_changed or urls_changed or blacklisted_removed):
-                    log.info(f"No changes needed for {media_path}")
+                # ---- DATE ----
+                if enable_dating and "date" in data:
+                    try:
+                        dt = datetime.datetime.strptime(data["date"], "%Y-%m-%d %H:%M:%S")
+                        update["date"] = dt.date().isoformat()
+                    except ValueError:
+                        pass
+
+                # ---- TITLE ----
+                # Run if title changes are NOT disabled
+                if not disable_title_changes and data.get("id"):
+                    update["title"] = data["id"]
+
+                # ---- URLS ----
+                # Run if URL mapping is NOT disabled
+                if not disable_url_mapping:
+                    urls = set(item.get("urls") or [])
+                    if "file_url" in data:
+                        urls.add(data["file_url"])
+                    if isinstance(data.get("source"), str):
+                        urls.update(data["source"].split())
+                    update["urls"] = list(urls)
+
+                if len(update) <= 1:
                     continue
 
-                # Get/Create tag IDs
-                tag_ids = []
-                for tag_name in all_tags:
-                    tags = client.find_tags({"name": {"value": tag_name, "modifier": "EQUALS"}})
-                    tag = tags[0] if tags else client.create_tag({"name": tag_name})
-                    tag_ids.append(tag['id'])
+                if dry_run:
+                    log.info(f"[DRY-RUN] Would update {media_path}: {update}")
+                    continue
 
-                # Get/Create performer IDs
-                performer_ids = []
-                for performer_name in all_performers:
-                    performers = client.find_performers({"name": {"value": performer_name, "modifier": "EQUALS"}})
-                    performer = performers[0] if performers else client.create_performer({"name": performer_name})
-                    performer_ids.append(performer['id'])
-
-                # Prepare update
-                update_data = {
-                    "id": item_id,
-                    "tag_ids": tag_ids,
-                    "performer_ids": performer_ids
-                }
-                if date_changed:
-                    update_data["date"] = date
-                if title_changed:
-                    update_data["title"] = title
-                if urls_changed:
-                    update_data["urls"] = list(all_urls)
-
-                # Update item
-                update_func = client.update_image if item_type == 'image' else client.update_scene
-                try:
-                    update_func(update_data)
-                    log.info(f"Updated metadata for {media_path}")
-                except Exception as e:
-                    log.error(f"Failed to update {media_path}: {str(e)}")
+                updater = client.update_image if item_type == "image" else client.update_scene
+                updater(update)
+                log.info(f"Updated metadata for {media_path}")
 
     if json_log:
         json_log.close()
 
-    log.info("Import completed")
+    if dry_run:
+        log.info("Dry run completed")
+    else:
+        log.info("Import completed")
+
     sys.exit(0)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
-    

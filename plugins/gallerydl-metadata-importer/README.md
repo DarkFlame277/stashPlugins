@@ -8,6 +8,8 @@ This plugin for the Stash app scans your media library and imports metadata from
 - **Tag Blacklist Filtering**: Loads a set of excluded tags from `/data/tag_blacklist.txt` (ignoring commented lines starting with `#` and empty lines), removing them from imported tags and existing item tags during re-runs.
 - **Organized Item Skipping**: Ignores items already marked as "organized" in Stash to prevent overwriting curated metadata.
 - **Error Handling and Logging**: Provides detailed logs for processed files, skips, and errors like invalid JSON or API failures. Each existing JSON file is also logged to `existing-jsons.log`.
+- **Dry Run Mode**: Preview all potential changes without modifying your Stash library (**enabled** by default).
+- **Configurable Settings**: Turn individual features on or off (tagging, performer adding, title changes, URL mapping, dating, organized skipping) directly in Stash’s Plugins settings menu.
 
 ## Installation and Usage
 1. Add this repo as a source in your Settings > Plugins > Available Plugins.
@@ -21,12 +23,9 @@ The plugin runs on demand and processes all eligible files in one go. It assumes
 The plugin extracts the following fields from Gallery-DL JSON files and maps them to Stash fields:
 - **Tags**: Pulled from the `"tags"` and `"tags_general"` fields, filtered against the blacklist, and added to the item's tags (creating new tags in Stash if needed).
 - **Performers**: Obtained from the `"tags_character"` field and updated added to the item.
-- **Date**: Extracted from the `"date"` field, converted to ISO date-only format ("`YYYY-MM-DD"`), and set as the item's date.
+- **Date**: Extracted from the `"date"` field, converted to ISO date-only format ("`YYYY-MM-DD"`), and set as the item's date (**disabled** by default).
 - **Title**: Taken from the `"id"` field and applied as the item's title.
 - **URLs**: Collected from the `"file_url"` field and the `"source"` field, and updated on the item.
 
 ## Credits
-The code was created by Grok and ChatGPT.
-
-## P.S.
-The `prompts` folder contains markdown files of most of the prompts I used to create this plugin.
+The code was created by Grok, GLM-4.7, and ChatGPT.
