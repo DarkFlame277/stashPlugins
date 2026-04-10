@@ -1,14 +1,18 @@
-# version: 0.5.5
+# version: 0.6.0
 
 import json
 import os
 import sys
+import time
 import datetime
 from stashapi.stashapp import StashInterface
 import stashapi.log as log
 
 BLACKLIST_PATH = "/data/tag_blacklist.txt"
 EXISTING_JSON_LOG = "/data/existing-jsons.log"
+BATCH_SIZE = 50
+RETRY_ATTEMPTS = 3
+RETRY_BACKOFF_BASE = 1  # seconds; actual delays are 1s, 2s, 4s
 
 
 def normalize_tag(tag: str) -> str:
@@ -36,6 +40,24 @@ def load_tag_blacklist() -> set:
     return blacklist
 
 
+def retry_call(fn, *args, **kwargs):
+    """
+    Calls fn(*args, **kwargs) with exponential backoff on failure.
+    Retries up to RETRY_ATTEMPTS times before re-raising the last exception.
+    Delays: RETRY_BACKOFF_BASE * 2^attempt  (e.g. 1s, 2s, 4s by default).
+    """
+    last_exc = None
+    for attempt in range(RETRY_ATTEMPTS):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            last_exc = e
+            wait = RETRY_BACKOFF_BASE * (2 ** attempt)
+            log.warning(f"API call failed (attempt {attempt + 1}/{RETRY_ATTEMPTS}): {e}. Retrying in {wait}s...")
+            time.sleep(wait)
+    raise last_exc
+
+
 def get_stash_config(client: StashInterface):
     """
     Fetches the plugin configuration directly from Stash.
@@ -52,27 +74,15 @@ def get_stash_config(client: StashInterface):
             log.warning("No plugins configuration found in Stash.")
             return None
 
-        # Try to find the correct key for this plugin.
-        # The key is usually the filename (without .yml). 
-        # Since we know the file is 'gallerydl-importer.yml', we look for keys containing "gallery" or "dl".
-        possible_keys = []
-        for k in plugins_map.keys():
-            if "gallery" in k.lower() or "dl" in k.lower():
-                possible_keys.append(k)
+        plugin_id = "gallerydl-importer"
+        if plugin_id in plugins_map:
+            log.info(f"Found plugin config under key: {plugin_id}")
+            return plugins_map[plugin_id]
 
-        if len(possible_keys) == 1:
-            log.info(f"Found matching plugin config key: {possible_keys[0]}")
-            return plugins_map[possible_keys[0]]
-        elif len(possible_keys) > 1:
-            # Ambiguous, but let's try the first one
-            log.warning(f"Multiple matching plugin keys found: {possible_keys}. Using first match.")
-            return plugins_map[possible_keys[0]]
-        else:
-            # Log available keys for debugging
-            log.warning("Could not automatically identify plugin settings. Available plugin keys:")
-            for k in plugins_map.keys():
-                log.warning(f" - {k}")
-            return None
+        log.warning(f"Plugin config key '{plugin_id}' not found in Stash. Available keys:")
+        for k in plugins_map.keys():
+            log.warning(f" - {k}")
+        return None
                 
     except Exception as e:
         log.error(f"Failed to fetch config from Stash API: {str(e)}")
@@ -82,19 +92,63 @@ def get_stash_config(client: StashInterface):
 def clean_blacklisted_tags(client: StashInterface, tag_blacklist: set, dry_run: bool):
     for tag_name in tag_blacklist:
         for variant in {tag_name, tag_name.replace(" ", "_")}:
-            tags = client.find_tags({"name": {"value": variant, "modifier": "EQUALS"}})
+            tags = retry_call(client.find_tags, {"name": {"value": variant, "modifier": "EQUALS"}})
             if tags:
                 tag_id = tags[0]["id"]
                 if dry_run:
                     log.info(f"[DRY-RUN] Would delete blacklisted tag: {variant}")
                 else:
                     try:
-                        client.call_GQL(
+                        retry_call(
+                            client.call_GQL,
                             f'mutation {{ tagDestroy(input: {{id: "{tag_id}"}}) }}'
                         )
                         log.info(f"Deleted blacklisted tag globally: {variant}")
                     except Exception as e:
                         log.error(f"Failed to delete {variant}: {str(e)}")
+
+
+def flush_updates(client: StashInterface, pending_updates: list):
+    """
+    Sends all pending updates to Stash in batches, using aliased GraphQL mutations
+    so each batch is a single HTTP request rather than one request per item.
+    """
+    if not pending_updates:
+        return
+
+    image_updates = [u for item_type, u in pending_updates if item_type == "image"]
+    scene_updates = [u for item_type, u in pending_updates if item_type == "scene"]
+
+    for updates, gql_type, input_type in (
+        (image_updates, "imageUpdate", "ImageUpdateInput"),
+        (scene_updates, "sceneUpdate", "SceneUpdateInput"),
+    ):
+        for batch_start in range(0, len(updates), BATCH_SIZE):
+            batch = updates[batch_start : batch_start + BATCH_SIZE]
+
+            # Build a single mutation with one alias per item, e.g.:
+            #   mutation BatchUpdate($input0: ImageUpdateInput!, ...) {
+            #     u0: imageUpdate(input: $input0) { id }
+            #     ...
+            #   }
+            var_decls = ", ".join(
+                f"$input{i}: {input_type}!" for i in range(len(batch))
+            )
+            ops = "\n".join(
+                f"  u{i}: {gql_type}(input: $input{i}) {{ id }}"
+                for i in range(len(batch))
+            )
+            mutation = f"mutation BatchUpdate({var_decls}) {{\n{ops}\n}}"
+            variables = {f"input{i}": u for i, u in enumerate(batch)}
+
+            try:
+                retry_call(client.call_GQL, mutation, variables)
+                log.info(
+                    f"Flushed batch of {len(batch)} {gql_type} updates "
+                    f"(items {batch_start}–{batch_start + len(batch) - 1})"
+                )
+            except Exception as e:
+                log.error(f"Batch update failed: {str(e)}")
 
 
 def main():
@@ -152,12 +206,21 @@ def main():
 
     image_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
     video_exts = {".mp4", ".mkv", ".avi", ".webm"}
+    all_exts = image_exts | video_exts
+
+    # --- Optimization 1: caches to avoid repeat API lookups per name ---
+    # Maps normalized name -> id (or None if created only in dry-run)
+    tag_cache: dict[str, str | None] = {}
+    performer_cache: dict[str, str | None] = {}
+
+    # --- Optimization 2: collect updates; flush in batches at the end ---
+    pending_updates: list[tuple[str, dict]] = []  # [(item_type, update_dict), ...]
 
     for root in root_dirs:
         for dirpath, _, filenames in os.walk(root):
             for filename in filenames:
                 ext = os.path.splitext(filename)[1].lower()
-                if ext not in image_exts | video_exts:
+                if ext not in all_exts:
                     continue
 
                 media_path = os.path.join(dirpath, filename)
@@ -177,7 +240,7 @@ def main():
                 item_type = "image" if ext in image_exts else "scene"
                 finder = client.find_images if item_type == "image" else client.find_scenes
 
-                items = finder({"path": {"value": media_path, "modifier": "EQUALS"}})
+                items = retry_call(finder, {"path": {"value": media_path, "modifier": "EQUALS"}})
                 if len(items) != 1:
                     continue
 
@@ -209,28 +272,33 @@ def main():
 
                     # Filter against blacklist
                     new_tags = {
-                        normalize_tag(t)
+                        normalized
                         for t in new_tags
-                        if normalize_tag(t) not in tag_blacklist
+                        if (normalized := normalize_tag(t)) not in tag_blacklist
                     }
 
                     if new_tags:
                         tag_ids = []
                         for t in new_tags:
-                            # Check if tag exists
-                            tags = client.find_tags({"name": {"value": t, "modifier": "EQUALS"}})
-                            if tags:
-                                tag_ids.append(tags[0]["id"])
-                            else:
-                                # Tag does not exist
-                                if not dry_run:
-                                    # Only create if NOT in dry run
-                                    tag = client.create_tag({"name": t})
-                                    tag_ids.append(tag["id"])
-                                    log.info(f"Created new tag: {t}")
+                            if t not in tag_cache:
+                                # First time seeing this tag name — hit the API once
+                                tags = retry_call(client.find_tags, {"name": {"value": t, "modifier": "EQUALS"}})
+                                if tags:
+                                    tag_cache[t] = tags[0]["id"]
                                 else:
-                                    # If Dry Run, log intent but do not create
-                                    log.info(f"[DRY-RUN] Would create tag: {t}")
+                                    # Tag does not exist
+                                    if not dry_run:
+                                        # Only create if NOT in dry run
+                                        tag = retry_call(client.create_tag, {"name": t})
+                                        tag_cache[t] = tag["id"]
+                                        log.info(f"Created new tag: {t}")
+                                    else:
+                                        # If Dry Run, log intent but do not create
+                                        log.info(f"[DRY-RUN] Would create tag: {t}")
+                                        tag_cache[t] = None  # sentinel: known-missing in dry run
+
+                            if tag_cache[t] is not None:
+                                tag_ids.append(tag_cache[t])
                         
                         # Only add tag_ids to update if we actually have IDs
                         if tag_ids:
@@ -240,23 +308,32 @@ def main():
                 # Run if performer adding is NOT disabled
                 if not disable_performer_adding and isinstance(data.get("tags_character"), str):
                     performer_ids = []
-                    for name in data["tags_character"].split():
-                        # Check if performer exists
-                        performers = client.find_performers(
-                            {"name": {"value": name, "modifier": "EQUALS"}}
-                        )
-                        if performers:
-                            performer_ids.append(performers[0]["id"])
-                        else:
-                            # Performer does not exist
-                            if not dry_run:
-                                # Only create if NOT in dry run
-                                performer = client.create_performer({"name": name})
-                                performer_ids.append(performer["id"])
-                                log.info(f"Created new performer: {name}")
+                    char_string = data["tags_character"]
+                    char_names = char_string.split(",") if "," in char_string else char_string.split()
+                    for name in char_names:
+                        name = name.strip()
+                        if name not in performer_cache:
+                            # First time seeing this performer name — hit the API once
+                            performers = retry_call(
+                                client.find_performers,
+                                {"name": {"value": name, "modifier": "EQUALS"}}
+                            )
+                            if performers:
+                                performer_cache[name] = performers[0]["id"]
                             else:
-                                # If Dry Run, log intent but do not create
-                                log.info(f"[DRY-RUN] Would create performer: {name}")
+                                # Performer does not exist
+                                if not dry_run:
+                                    # Only create if NOT in dry run
+                                    performer = retry_call(client.create_performer, {"name": name})
+                                    performer_cache[name] = performer["id"]
+                                    log.info(f"Created new performer: {name}")
+                                else:
+                                    # If Dry Run, log intent but do not create
+                                    log.info(f"[DRY-RUN] Would create performer: {name}")
+                                    performer_cache[name] = None  # sentinel: known-missing in dry run
+
+                        if performer_cache[name] is not None:
+                            performer_ids.append(performer_cache[name])
 
                     if performer_ids:
                         update["performer_ids"] = performer_ids
@@ -291,12 +368,14 @@ def main():
                     log.info(f"[DRY-RUN] Would update {media_path}: {update}")
                     continue
 
-                updater = client.update_image if item_type == "image" else client.update_scene
-                updater(update)
-                log.info(f"Updated metadata for {media_path}")
+                # Queue the update instead of sending it immediately
+                pending_updates.append((item_type, update))
 
     if json_log:
         json_log.close()
+
+    # Flush all queued updates in batches
+    flush_updates(client, pending_updates)
 
     if dry_run:
         log.info("Dry run completed")
