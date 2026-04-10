@@ -28,4 +28,4 @@ The plugin extracts the following fields from Gallery-DL JSON files and maps the
 - **URLs**: Collected from the `"file_url"` field and the `"source"` field, and updated on the item.
 
 ## Credits
-The code was created by Grok, GLM-4.7, and ChatGPT.
+The code was created by Grok, GLM-4.7, and ChatGPT. Optimizations were done by Claude Sonnet 4.6.
